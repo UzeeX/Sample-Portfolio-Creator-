@@ -1,4 +1,3 @@
-
 import io
 import re
 from typing import List, Optional, Tuple
@@ -7,6 +6,7 @@ import pandas as pd
 import streamlit as st
 from PIL import Image, ImageOps
 
+# Optional packages
 try:
     import yfinance as yf
     YFINANCE_AVAILABLE = True
@@ -20,6 +20,7 @@ try:
 except Exception:
     RapidOCR = None
     OCR_AVAILABLE = False
+
 
 st.set_page_config(page_title="Portfolio Image/CSV to Sample Import CSV", layout="wide")
 
@@ -54,7 +55,7 @@ DEFAULT_PORTFOLIO = [
     ("MSFT", "Microsoft", 3.0),
     ("RY", "Banque Royale du Canada", 3.0),
     ("TD", "Banque Toronto Dominion", 3.0),
-    ("WMT", "Wallmart", 3.0),
+    ("WMT", "Walmart", 3.0),
     ("FLEM", "Franklin Emerging Market ETF", 3.0),
     ("ATD", "Alimentation Couche-Tard", 3.0),
     ("FGDL", "Franklin Gold ETF", 3.0),
@@ -120,13 +121,17 @@ TICKER_MAP = {
     "CAD": {"yf": None, "mic": "XOTC", "country": "CA", "currency": "CAD"},
 }
 
+
 def init_state():
     if "holdings_df" not in st.session_state:
-        st.session_state["holdings_df"] = pd.DataFrame(DEFAULT_PORTFOLIO, columns=["Ticker", "Name", "Weight %"])
+        st.session_state["holdings_df"] = pd.DataFrame(
+            DEFAULT_PORTFOLIO, columns=["Ticker", "Name", "Weight %"]
+        )
     if "usd_cad" not in st.session_state:
         st.session_state["usd_cad"] = 1.37
     if "priced_df" not in st.session_state:
         st.session_state["priced_df"] = None
+
 
 def clean_weight(value) -> Optional[float]:
     if value is None:
@@ -140,37 +145,47 @@ def clean_weight(value) -> Optional[float]:
     except Exception:
         return None
 
+
 def normalize_ticker(ticker: str) -> str:
     t = (ticker or "").upper().strip().replace(" ", "")
     t = t.replace("BRK/B", "BRK.B").replace("BRK-B", "BRK.B")
     t = t.replace("TECK-B", "TECK.B").replace("CCL-B", "CCL.B")
     return t
 
+
 def parse_text_portfolio(raw_text: str) -> pd.DataFrame:
     rows: List[Tuple[str, str, float]] = []
     seen = set()
+
     for raw_line in raw_text.splitlines():
         line = re.sub(r"\s+", " ", raw_line).strip()
         if not line:
             continue
+
         weight_match = re.search(r"(\d+[.,]?\d*)\s*%?$", line)
         if not weight_match:
             continue
+
         weight = clean_weight(weight_match.group(1))
         if weight is None:
             continue
+
         left = line[:weight_match.start()].strip()
         ticker_match = re.match(r"^([A-Z][A-Z0-9.\-]{0,9})\b", left)
         if not ticker_match:
             continue
+
         ticker = normalize_ticker(ticker_match.group(1))
         name = left[ticker_match.end():].strip(" -|:") or ticker
+
         key = (ticker, round(weight, 4))
         if key in seen:
             continue
         seen.add(key)
         rows.append((ticker, name, weight))
+
     return pd.DataFrame(rows, columns=["Ticker", "Name", "Weight %"])
+
 
 def image_to_text(image: Image.Image) -> str:
     if not OCR_AVAILABLE:
@@ -181,9 +196,12 @@ def image_to_text(image: Image.Image) -> str:
         result, _ = engine(gray)
         if not result:
             return ""
-        return "\n".join([item[1] for item in result if item and len(item) > 1 and item[1]])
+        return "\n".join(
+            [item[1] for item in result if item and len(item) > 1 and item[1]]
+        )
     except Exception:
         return ""
+
 
 @st.cache_data(show_spinner=False)
 def get_fx_usd_cad() -> float:
@@ -200,6 +218,7 @@ def get_fx_usd_cad() -> float:
         pass
     return 1.37
 
+
 @st.cache_data(show_spinner=False)
 def fetch_last_price(yf_symbol: Optional[str]) -> Optional[float]:
     if not YFINANCE_AVAILABLE or not yf_symbol:
@@ -214,70 +233,92 @@ def fetch_last_price(yf_symbol: Optional[str]) -> Optional[float]:
         return None
     return None
 
+
 def build_prices(df: pd.DataFrame, usd_cad: float) -> pd.DataFrame:
     out = df.copy()
     meta_rows = []
+
     for tkr in out["Ticker"]:
-        meta = TICKER_MAP.get(tkr, {"yf": tkr, "mic": "", "country": "", "currency": "USD"})
+        meta = TICKER_MAP.get(
+            tkr, {"yf": tkr, "mic": "", "country": "", "currency": "USD"}
+        )
         price = None if tkr == "CAD" else fetch_last_price(meta["yf"])
-        meta_rows.append({
-            "Yahoo Symbol": meta["yf"],
-            "Currency": meta["currency"],
-            "Price": price if price is not None else 0.0,
-            "MIC": meta["mic"],
-            "Listing Country": meta["country"],
-            "Exchange Rate": 1.0 if meta["currency"] == "CAD" else usd_cad,
-        })
+        meta_rows.append(
+            {
+                "Yahoo Symbol": meta["yf"],
+                "Currency": meta["currency"],
+                "Price": price if price is not None else 0.0,
+                "MIC": meta["mic"],
+                "Listing Country": meta["country"],
+                "Exchange Rate": 1.0 if meta["currency"] == "CAD" else usd_cad,
+            }
+        )
+
     return pd.concat([out.reset_index(drop=True), pd.DataFrame(meta_rows)], axis=1)
+
 
 def allocate_portfolio(df: pd.DataFrame, total_cad: float):
     out = df.copy()
     out["Target CAD"] = total_cad * out["Weight %"] / 100.0
+
     shares = []
     cost_basis = []
+
     for _, row in out.iterrows():
         if row["Ticker"] == "CAD":
             shares.append(0)
             cost_basis.append(0.0)
             continue
+
         px = float(row.get("Price", 0) or 0)
         fx = float(row.get("Exchange Rate", 1) or 1)
+
         if px <= 0 or fx <= 0:
             shares.append(0)
             cost_basis.append(0.0)
             continue
+
         whole_shares = int(row["Target CAD"] // (px * fx))
         shares.append(whole_shares)
         cost_basis.append(round(px, 6))
+
     out["Shares"] = shares
     out["Cost Basis"] = cost_basis
     out["Allocated CAD"] = out["Shares"] * out["Cost Basis"] * out["Exchange Rate"]
+
     invested = float(out.loc[out["Ticker"] != "CAD", "Allocated CAD"].sum())
     residual_cash = round(total_cad - invested, 2)
+
     out.loc[out["Ticker"] == "CAD", "Shares"] = 0
     out.loc[out["Ticker"] == "CAD", "Cost Basis"] = residual_cash
     out.loc[out["Ticker"] == "CAD", "Allocated CAD"] = residual_cash
+
     return out, residual_cash
+
 
 def to_sample_csv(df: pd.DataFrame, as_of_date: str) -> pd.DataFrame:
     rows = []
     for _, row in df.iterrows():
-        rows.append({
-            "Date": as_of_date,
-            "Type": "BUY",
-            "Figi": "",
-            "Ticker": row["Ticker"],
-            "MIC": row["MIC"],
-            "Listing Country": row["Listing Country"],
-            "Shares": row["Shares"],
-            "Cost Basis": row["Cost Basis"],
-            "Exchange Rate": row["Exchange Rate"],
-            "Affect Cash": "TRUE",
-        })
+        rows.append(
+            {
+                "Date": as_of_date,
+                "Type": "BUY",
+                "Figi": "",
+                "Ticker": row["Ticker"],
+                "MIC": row["MIC"],
+                "Listing Country": row["Listing Country"],
+                "Shares": row["Shares"],
+                "Cost Basis": row["Cost Basis"],
+                "Exchange Rate": row["Exchange Rate"],
+                "Affect Cash": "TRUE",
+            }
+        )
     return pd.DataFrame(rows, columns=SAMPLE_COLUMNS)
+
 
 def csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8-sig")
+
 
 init_state()
 
@@ -285,42 +326,74 @@ st.title("Portfolio Image/CSV to Sample Import CSV")
 st.caption("Reads from image, pasted text, or CSV. Default base is C$1,000,000.")
 
 if not YFINANCE_AVAILABLE:
-    st.warning("yfinance is not installed in this environment. The app still works, but prices must be entered manually.")
+    st.warning(
+        "yfinance is not installed in this environment. Auto-price fetch is disabled."
+    )
 if not OCR_AVAILABLE:
-    st.info("OCR package is not installed. Image upload still works, but text extraction from images is disabled until installed.")
+    st.info(
+        "OCR package is not installed. Image upload still works, but text extraction from images is disabled."
+    )
 
 with st.sidebar:
-    total_cad = st.number_input("Base portfolio (CAD)", min_value=1000.0, value=float(DEFAULT_TOTAL_CAD), step=10000.0, format="%.2f")
+    total_cad = st.number_input(
+        "Base portfolio (CAD)",
+        min_value=1000.0,
+        value=float(DEFAULT_TOTAL_CAD),
+        step=10000.0,
+        format="%.2f",
+    )
+
     if st.checkbox("Auto-fetch USD/CAD", value=YFINANCE_AVAILABLE):
         st.session_state["usd_cad"] = get_fx_usd_cad()
-    usd_cad = st.number_input("USD/CAD", min_value=0.5, max_value=3.0, value=float(st.session_state["usd_cad"]), step=0.01, format="%.6f")
+
+    usd_cad = st.number_input(
+        "USD/CAD",
+        min_value=0.5,
+        max_value=3.0,
+        value=float(st.session_state["usd_cad"]),
+        step=0.01,
+        format="%.6f",
+    )
+
     as_of_date = st.date_input("Trade date")
 
 tab1, tab2, tab3 = st.tabs(["Image / Text", "CSV Upload", "Review & Export"])
 
 with tab1:
-    uploaded_image = st.file_uploader("Upload screenshot/image", type=["png", "jpg", "jpeg", "webp"], key="img_upl")
+    uploaded_image = st.file_uploader(
+        "Upload screenshot/image", type=["png", "jpg", "jpeg", "webp"], key="img_upl"
+    )
     pasted_text = st.text_area("Or paste text directly", height=220)
+
     col_a, col_b = st.columns(2)
+
     with col_a:
         if st.button("Use default sample portfolio"):
-            st.session_state["holdings_df"] = pd.DataFrame(DEFAULT_PORTFOLIO, columns=["Ticker", "Name", "Weight %"])
+            st.session_state["holdings_df"] = pd.DataFrame(
+                DEFAULT_PORTFOLIO, columns=["Ticker", "Name", "Weight %"]
+            )
             st.success("Loaded default portfolio.")
+
     with col_b:
         if st.button("Parse image / text"):
             parsed_df = pd.DataFrame(columns=["Ticker", "Name", "Weight %"])
             ocr_text = ""
+
             if uploaded_image is not None:
                 image = Image.open(uploaded_image)
                 st.image(image, caption="Uploaded image", use_container_width=True)
                 ocr_text = image_to_text(image)
                 if ocr_text:
                     st.text_area("OCR text", value=ocr_text, height=220)
+
             source_text = pasted_text.strip() if pasted_text.strip() else ocr_text
             if source_text:
                 parsed_df = parse_text_portfolio(source_text)
+
             if parsed_df.empty:
-                st.warning("Nothing reliable was parsed. You can still edit the table manually in the Review tab.")
+                st.warning(
+                    "Nothing reliable was parsed. You can still edit the table manually in the Review tab."
+                )
             else:
                 st.session_state["holdings_df"] = parsed_df
                 st.success(f"Parsed {len(parsed_df)} rows.")
@@ -330,18 +403,25 @@ with tab2:
     if uploaded_csv is not None:
         df_csv = pd.read_csv(uploaded_csv)
         st.dataframe(df_csv, use_container_width=True)
+
         cols = list(df_csv.columns)
         if cols:
             c1, c2, c3 = st.columns(3)
             ticker_col = c1.selectbox("Ticker column", cols, index=0)
-            name_col = c2.selectbox("Name column", cols, index=min(1, len(cols)-1))
-            weight_col = c3.selectbox("Weight column", cols, index=min(2, len(cols)-1))
+            name_col = c2.selectbox("Name column", cols, index=min(1, len(cols) - 1))
+            weight_col = c3.selectbox(
+                "Weight column", cols, index=min(2, len(cols) - 1)
+            )
+
             if st.button("Load CSV into holdings"):
-                mapped = pd.DataFrame({
-                    "Ticker": df_csv[ticker_col].astype(str).map(normalize_ticker),
-                    "Name": df_csv[name_col].astype(str),
-                    "Weight %": df_csv[weight_col].map(clean_weight),
-                }).dropna(subset=["Ticker", "Weight %"]).reset_index(drop=True)
+                mapped = pd.DataFrame(
+                    {
+                        "Ticker": df_csv[ticker_col].astype(str).map(normalize_ticker),
+                        "Name": df_csv[name_col].astype(str),
+                        "Weight %": df_csv[weight_col].map(clean_weight),
+                    }
+                ).dropna(subset=["Ticker", "Weight %"]).reset_index(drop=True)
+
                 st.session_state["holdings_df"] = mapped
                 st.success(f"Loaded {len(mapped)} rows from CSV.")
 
@@ -352,6 +432,7 @@ with tab3:
         use_container_width=True,
         key="holdings_editor",
     )
+
     edited["Ticker"] = edited["Ticker"].astype(str).map(normalize_ticker)
     edited["Weight %"] = pd.to_numeric(edited["Weight %"], errors="coerce")
     edited = edited.dropna(subset=["Ticker", "Weight %"]).reset_index(drop=True)
@@ -363,6 +444,7 @@ with tab3:
 
     if st.session_state["priced_df"] is not None:
         st.caption("Rows with Price = 0 need a manual value before export.")
+
         priced = st.data_editor(
             st.session_state["priced_df"],
             num_rows="dynamic",
@@ -378,9 +460,21 @@ with tab3:
         c2.metric("Rows", len(sample_csv))
 
         st.dataframe(
-            allocated[["Ticker", "Name", "Weight %", "Price", "Currency", "Exchange Rate", "Shares", "Allocated CAD"]],
+            allocated[
+                [
+                    "Ticker",
+                    "Name",
+                    "Weight %",
+                    "Price",
+                    "Currency",
+                    "Exchange Rate",
+                    "Shares",
+                    "Allocated CAD",
+                ]
+            ],
             use_container_width=True,
         )
+
         st.dataframe(sample_csv, use_container_width=True)
 
         st.download_button(
