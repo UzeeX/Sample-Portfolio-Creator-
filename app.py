@@ -5,14 +5,7 @@ from typing import List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 from PIL import Image, ImageOps
-
-# Optional packages
-try:
-    import yfinance as yf
-    YFINANCE_AVAILABLE = True
-except Exception:
-    yf = None
-    YFINANCE_AVAILABLE = False
+import yfinance as yf
 
 try:
     from rapidocr_onnxruntime import RapidOCR
@@ -205,23 +198,18 @@ def image_to_text(image: Image.Image) -> str:
 
 @st.cache_data(show_spinner=False)
 def get_fx_usd_cad() -> float:
-    if not YFINANCE_AVAILABLE:
-        return 1.37
-    try:
-        fx = yf.Ticker("CADUSD=X")
-        hist = fx.history(period="5d")
-        if not hist.empty:
-            cadusd = float(hist["Close"].dropna().iloc[-1])
-            if cadusd > 0:
-                return round(1 / cadusd, 6)
-    except Exception:
-        pass
+    fx = yf.Ticker("CADUSD=X")
+    hist = fx.history(period="5d")
+    if not hist.empty:
+        cadusd = float(hist["Close"].dropna().iloc[-1])
+        if cadusd > 0:
+            return round(1 / cadusd, 6)
     return 1.37
 
 
 @st.cache_data(show_spinner=False)
 def fetch_last_price(yf_symbol: Optional[str]) -> Optional[float]:
-    if not YFINANCE_AVAILABLE or not yf_symbol:
+    if not yf_symbol:
         return None
     try:
         ticker = yf.Ticker(yf_symbol)
@@ -325,15 +313,6 @@ init_state()
 st.title("Portfolio Image/CSV to Sample Import CSV")
 st.caption("Reads from image, pasted text, or CSV. Default base is C$1,000,000.")
 
-if not YFINANCE_AVAILABLE:
-    st.warning(
-        "yfinance is not installed in this environment. Auto-price fetch is disabled."
-    )
-if not OCR_AVAILABLE:
-    st.info(
-        "OCR package is not installed. Image upload still works, but text extraction from images is disabled."
-    )
-
 with st.sidebar:
     total_cad = st.number_input(
         "Base portfolio (CAD)",
@@ -343,7 +322,7 @@ with st.sidebar:
         format="%.2f",
     )
 
-    if st.checkbox("Auto-fetch USD/CAD", value=YFINANCE_AVAILABLE):
+    if st.checkbox("Auto-fetch USD/CAD", value=True):
         st.session_state["usd_cad"] = get_fx_usd_cad()
 
     usd_cad = st.number_input(
@@ -443,7 +422,7 @@ with tab3:
         st.session_state["priced_df"] = build_prices(edited, usd_cad)
 
     if st.session_state["priced_df"] is not None:
-        st.caption("Rows with Price = 0 need a manual value before export.")
+        st.caption("Rows with Price = 0 usually mean the ticker was not found.")
 
         priced = st.data_editor(
             st.session_state["priced_df"],
