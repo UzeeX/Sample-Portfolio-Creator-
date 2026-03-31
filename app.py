@@ -1,30 +1,24 @@
-import math
-from datetime import date
-from io import BytesIO
+
+import io
+import re
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
+import yfinance as yf
+from PIL import Image, ImageOps
 
-st.set_page_config(page_title="Portfolio to Sample CSV", layout="wide")
-
-# Optional dependency at runtime; app still works with manual prices if unavailable.
 try:
-    import yfinance as yf
+    from rapidocr_onnxruntime import RapidOCR
+    OCR_AVAILABLE = True
 except Exception:
-    yf = None
+    OCR_AVAILABLE = False
 
-SAMPLE_COLUMNS = [
-    "Date",
-    "Type",
-    "Figi",
-    "Ticker",
-    "MIC",
-    "Listing Country",
-    "Shares",
-    "Cost Basis",
-    "Exchange Rate",
-    "Affect Cash",
-]
+
+st.set_page_config(page_title="Portfolio Image/CSV to Import CSV", layout="wide")
+
+DEFAULT_TOTAL_CAD = 1_000_000.0
 
 DEFAULT_PORTFOLIO = [
     ("CAD", "Encaisse", 1.0),
@@ -46,7 +40,7 @@ DEFAULT_PORTFOLIO = [
     ("MA", "Mastercard", 2.0),
     ("BCE", "BCE INC", 2.0),
     ("ARX", "ARC Ressources", 2.0),
-    ("WCN", "Waste Connnections Inc", 2.0),
+    ("WCN", "Waste Connections Inc", 2.0),
     ("TFII", "TFI International Inc", 2.0),
     ("GSK", "GlaxoSmithKline", 2.0),
     ("CVE", "Cenovus Energy", 2.5),
@@ -54,7 +48,7 @@ DEFAULT_PORTFOLIO = [
     ("ENB", "Enbridge", 3.0),
     ("MSFT", "Microsoft", 3.0),
     ("RY", "Banque Royale du Canada", 3.0),
-    ("TD", "Banque Toronto Dominium", 3.0),
+    ("TD", "Banque Toronto Dominion", 3.0),
     ("WMT", "Wallmart", 3.0),
     ("FLEM", "Franklin Emerging Market ETF", 3.0),
     ("ATD", "Alimentation Couche-Tard", 3.0),
@@ -67,268 +61,339 @@ DEFAULT_PORTFOLIO = [
     ("EQY", "Franklin All Equity ETF", 7.5),
 ]
 
-CA_TICKERS = {
-    "CCL.B", "TECK.B", "WSP", "NTR", "ATRL", "MRU", "NA", "T", "BCE", "ARX", "TFII",
-    "CVE", "ENB", "RY", "TD", "ATD", "FHIS", "EQY"
+SAMPLE_COLUMNS = [
+    "Date",
+    "Type",
+    "Figi",
+    "Ticker",
+    "MIC",
+    "Listing Country",
+    "Shares",
+    "Cost Basis",
+    "Exchange Rate",
+    "Affect Cash",
+]
+
+TICKER_MAP = {
+    "CCL.B": {"yf": "CCL.B.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "TECK.B": {"yf": "TECK-B.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "WSP": {"yf": "WSP.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "NTR": {"yf": "NTR.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "ATRL": {"yf": "ATRL.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "MRU": {"yf": "MRU.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "NA": {"yf": "NA.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "T": {"yf": "T.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "BCE": {"yf": "BCE.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "ARX": {"yf": "ARX.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "TFII": {"yf": "TFII.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "CVE": {"yf": "CVE.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "ENB": {"yf": "ENB.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "RY": {"yf": "RY.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "TD": {"yf": "TD.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "ATD": {"yf": "ATD.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "FLEM": {"yf": "FLEM.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "FGDL": {"yf": "FGDL.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "FHIS": {"yf": "FHIS.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "EQY": {"yf": "EQY.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "META": {"yf": "META", "mic": "XNAS", "country": "US", "currency": "USD"},
+    "ETN": {"yf": "ETN", "mic": "XNYS", "country": "US", "currency": "USD"},
+    "AVGO": {"yf": "AVGO", "mic": "XNAS", "country": "US", "currency": "USD"},
+    "MCD": {"yf": "MCD", "mic": "XNYS", "country": "US", "currency": "USD"},
+    "JPM": {"yf": "JPM", "mic": "XNYS", "country": "US", "currency": "USD"},
+    "NKE": {"yf": "NKE", "mic": "XNYS", "country": "US", "currency": "USD"},
+    "UNH": {"yf": "UNH", "mic": "XNYS", "country": "US", "currency": "USD"},
+    "MA": {"yf": "MA", "mic": "XNYS", "country": "US", "currency": "USD"},
+    "WCN": {"yf": "WCN", "mic": "XNYS", "country": "CA", "currency": "USD"},
+    "GSK": {"yf": "GSK", "mic": "XNYS", "country": "GB", "currency": "USD"},
+    "AAPL": {"yf": "AAPL", "mic": "XNAS", "country": "US", "currency": "USD"},
+    "MSFT": {"yf": "MSFT", "mic": "XNAS", "country": "US", "currency": "USD"},
+    "WMT": {"yf": "WMT", "mic": "XNYS", "country": "US", "currency": "USD"},
+    "AMZN": {"yf": "AMZN", "mic": "XNAS", "country": "US", "currency": "USD"},
+    "TSM": {"yf": "TSM", "mic": "XNYS", "country": "TW", "currency": "USD"},
+    "GOOGL": {"yf": "GOOGL", "mic": "XNAS", "country": "US", "currency": "USD"},
+    "BRK.B": {"yf": "BRK-B", "mic": "XNYS", "country": "US", "currency": "USD"},
+    "CAD": {"yf": None, "mic": "XOTC", "country": "CA", "currency": "CAD"},
 }
-US_TICKERS = {
-    "META", "ETN", "AVGO", "MCD", "JPM", "NKE", "UNH", "MA", "WCN", "GSK", "AAPL",
-    "MSFT", "WMT", "FLEM", "FGDL", "AMZN", "TSM", "GOOGL", "BRK.B"
-}
-ETF_ARCA = {"FLEM", "FGDL"}
+
+OCR_ENGINE = None
+
+@dataclass
+class Holding:
+    ticker: str
+    name: str
+    weight_pct: float
 
 
-def default_df() -> pd.DataFrame:
-    return pd.DataFrame(DEFAULT_PORTFOLIO, columns=["Ticker", "Name", "Weight %"])
+def init_state():
+    if "holdings_df" not in st.session_state:
+        st.session_state["holdings_df"] = pd.DataFrame(DEFAULT_PORTFOLIO, columns=["Ticker", "Name", "Weight %"])
+    if "usd_cad" not in st.session_state:
+        st.session_state["usd_cad"] = 1.37
 
 
-def clean_weight(x) -> float:
-    if pd.isna(x):
-        return 0.0
-    if isinstance(x, str):
-        x = x.replace("%", "").replace(",", ".").strip()
-    return float(x)
-
-
-def classify_ticker(ticker: str):
-    t = str(ticker).strip().upper()
-    if t == "CAD":
-        return {"country": "CA", "mic": "XCAD", "is_us": False}
-    if t in CA_TICKERS:
-        return {"country": "CA", "mic": "XTSE", "is_us": False}
-    if t in ETF_ARCA:
-        return {"country": "US", "mic": "ARCX", "is_us": True}
-    if t in US_TICKERS:
-        nyse = {"ETN", "MCD", "JPM", "NKE", "UNH", "MA", "WCN", "GSK", "WMT", "TSM", "BRK.B"}
-        return {"country": "US", "mic": "XNYS" if t in nyse else "XNAS", "is_us": True}
-    # Fallback: plain heuristic
-    if "." in t:
-        return {"country": "CA", "mic": "XTSE", "is_us": False}
-    return {"country": "US", "mic": "XNAS", "is_us": True}
-
-
-def yf_symbol(ticker: str, country: str) -> str:
-    t = ticker.upper().strip()
-    if country == "CA":
-        return (
-            t.replace(".B", "-B") + ".TO"
-            if t.endswith(".B") else t + ".TO"
-        )
-    # US special cases
-    mapping = {"BRK.B": "BRK-B", "META": "META", "GOOGL": "GOOGL"}
-    return mapping.get(t, t)
-
-
-def fetch_last_prices(df: pd.DataFrame):
-    prices = {}
-    fx = None
-    if yf is None:
-        return prices, fx
-
+def clean_weight(value: str) -> Optional[float]:
+    if value is None:
+        return None
+    txt = str(value).strip().replace("%", "").replace(",", ".")
+    txt = re.sub(r"[^0-9.\-]", "", txt)
+    if not txt:
+        return None
     try:
-        fx_hist = yf.Ticker("CADUSD=X").history(period="5d", auto_adjust=False)
-        if not fx_hist.empty:
-            fx = float(fx_hist["Close"].dropna().iloc[-1])
+        return float(txt)
     except Exception:
-        fx = None
+        return None
 
-    for t in df["Ticker"].astype(str):
-        if t.upper() == "CAD":
+
+def normalize_ticker(ticker: str) -> str:
+    t = (ticker or "").upper().strip()
+    t = t.replace(" ", "")
+    t = t.replace("BRK/B", "BRK.B").replace("BRK-B", "BRK.B")
+    t = t.replace("TECK-B", "TECK.B").replace("CCL-B", "CCL.B")
+    return t
+
+
+def parse_text_portfolio(raw_text: str) -> pd.DataFrame:
+    rows: List[Tuple[str, str, float]] = []
+    seen = set()
+    for raw_line in raw_text.splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if not line:
             continue
-        meta = classify_ticker(t)
-        symbol = yf_symbol(t, meta["country"])
-        try:
-            hist = yf.Ticker(symbol).history(period="5d", auto_adjust=False)
-            if not hist.empty:
-                prices[t.upper()] = float(hist["Close"].dropna().iloc[-1])
-        except Exception:
-            pass
-    return prices, fx
-
-
-def build_import(df: pd.DataFrame, trade_date: date, base_cad: float, fx_cadusd: float, manual_prices: dict):
-    rows = []
-    residual_cash = 0.0
-
-    df2 = df.copy()
-    df2["Ticker"] = df2["Ticker"].astype(str).str.strip().str.upper()
-    df2["Weight %"] = df2["Weight %"].apply(clean_weight)
-
-    for _, r in df2.iterrows():
-        ticker = r["Ticker"]
-        weight = float(r["Weight %"])
-        target_cad = base_cad * weight / 100.0
-
-        if ticker == "CAD":
-            residual_cash += target_cad
+        weight_match = re.search(r"(\d+[.,]?\d*)\s*%?$", line)
+        if not weight_match:
             continue
-
-        meta = classify_ticker(ticker)
-        price = manual_prices.get(ticker)
-        if not price or price <= 0:
+        weight = clean_weight(weight_match.group(1))
+        if weight is None:
             continue
-
-        if meta["is_us"]:
-            # fx_cadusd = USD per 1 CAD. Convert CAD target to USD before sizing.
-            shares = math.floor((target_cad * fx_cadusd) / price)
-            exchange_rate = fx_cadusd
-            spent_cad = (shares * price) / fx_cadusd if shares > 0 else 0.0
-        else:
-            shares = math.floor(target_cad / price)
-            exchange_rate = None
-            spent_cad = shares * price if shares > 0 else 0.0
-
-        residual_cash += max(target_cad - spent_cad, 0.0)
-
-        if shares <= 0:
+        left = line[:weight_match.start()].strip()
+        ticker_match = re.match(r"^([A-Z][A-Z0-9.\-]{0,9})\b", left)
+        if not ticker_match:
             continue
+        ticker = normalize_ticker(ticker_match.group(1))
+        name = left[ticker_match.end():].strip(" -|:") or ticker
+        key = (ticker, round(weight, 4))
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append((ticker, name, weight))
+    df = pd.DataFrame(rows, columns=["Ticker", "Name", "Weight %"])
+    return df
 
-        rows.append({
-            "Date": trade_date.isoformat(),
-            "Type": "buy",
-            "Figi": "",
-            "Ticker": ticker,
+
+def image_to_text(image: Image.Image) -> str:
+    global OCR_ENGINE
+    if not OCR_AVAILABLE:
+        return ""
+    if OCR_ENGINE is None:
+        OCR_ENGINE = RapidOCR()
+    gray = ImageOps.grayscale(image)
+    result, _ = OCR_ENGINE(gray)
+    if not result:
+        return ""
+    return "\n".join([item[1] for item in result if item and len(item) > 1 and item[1]])
+
+
+@st.cache_data(show_spinner=False)
+def get_fx_usd_cad() -> float:
+    try:
+        fx = yf.Ticker("CADUSD=X")
+        hist = fx.history(period="5d")
+        if not hist.empty:
+            cadusd = float(hist["Close"].dropna().iloc[-1])
+            if cadusd > 0:
+                return round(1 / cadusd, 6)
+    except Exception:
+        pass
+    return 1.37
+
+
+@st.cache_data(show_spinner=False)
+def fetch_last_price(yf_symbol: str) -> Optional[float]:
+    if not yf_symbol:
+        return None
+    try:
+        ticker = yf.Ticker(yf_symbol)
+        hist = ticker.history(period="5d", auto_adjust=False)
+        closes = hist["Close"].dropna()
+        if not closes.empty:
+            return float(closes.iloc[-1])
+    except Exception:
+        return None
+    return None
+
+
+def build_prices(df: pd.DataFrame, usd_cad: float) -> pd.DataFrame:
+    out = df.copy()
+    meta_rows = []
+    for tkr in out["Ticker"]:
+        meta = TICKER_MAP.get(tkr, {"yf": tkr, "mic": "", "country": "", "currency": "USD"})
+        price = None if tkr == "CAD" else fetch_last_price(meta["yf"])
+        meta_rows.append({
+            "Yahoo Symbol": meta["yf"],
+            "Currency": meta["currency"],
+            "Price": price if price is not None else 0.0,
             "MIC": meta["mic"],
             "Listing Country": meta["country"],
-            "Shares": int(shares),
-            "Cost Basis": round(price, 4),
-            "Exchange Rate": round(exchange_rate, 6) if exchange_rate else "",
-            "Affect Cash": True,
+            "Exchange Rate": 1.0 if meta["currency"] == "CAD" else usd_cad,
         })
-
-    out = pd.DataFrame(rows, columns=SAMPLE_COLUMNS)
-    summary = pd.DataFrame({
-        "Residual Cash CAD": [round(residual_cash, 2)],
-        "Total Invested CAD": [round(base_cad - residual_cash, 2)],
-        "Base CAD": [round(base_cad, 2)],
-    })
-    return out, summary
+    meta_df = pd.DataFrame(meta_rows)
+    return pd.concat([out.reset_index(drop=True), meta_df], axis=1)
 
 
-def to_csv_bytes(df: pd.DataFrame) -> bytes:
-    return df.to_csv(index=False).encode("utf-8")
+def allocate_portfolio(df: pd.DataFrame, total_cad: float) -> Tuple[pd.DataFrame, float]:
+    out = df.copy()
+    out["Target CAD"] = total_cad * out["Weight %"] / 100.0
+    shares = []
+    cost_basis = []
+    for _, row in out.iterrows():
+        if row["Ticker"] == "CAD":
+            shares.append(0)
+            cost_basis.append(0.0)
+            continue
+        px = float(row["Price"] or 0)
+        fx = float(row["Exchange Rate"] or 1)
+        if px <= 0 or fx <= 0:
+            shares.append(0)
+            cost_basis.append(0.0)
+            continue
+        whole_shares = int(row["Target CAD"] // (px * fx))
+        shares.append(whole_shares)
+        cost_basis.append(round(px, 6))
+    out["Shares"] = shares
+    out["Cost Basis"] = cost_basis
+    out["Allocated CAD"] = out["Shares"] * out["Cost Basis"] * out["Exchange Rate"]
+    invested = float(out.loc[out["Ticker"] != "CAD", "Allocated CAD"].sum())
+    residual_cash = round(total_cad - invested, 2)
+    out.loc[out["Ticker"] == "CAD", "Cost Basis"] = residual_cash
+    out.loc[out["Ticker"] == "CAD", "Allocated CAD"] = residual_cash
+    return out, residual_cash
 
 
-st.title("Portfolio to Sample CSV")
-st.caption("Builds an import file in the same structure as your sample, using C$1,000,000 by default.")
+def to_sample_csv(df: pd.DataFrame, as_of_date: str) -> pd.DataFrame:
+    rows = []
+    for _, row in df.iterrows():
+        rows.append({
+            "Date": as_of_date,
+            "Type": "BUY",
+            "Figi": "",
+            "Ticker": row["Ticker"],
+            "MIC": row["MIC"],
+            "Listing Country": row["Listing Country"],
+            "Shares": row["Shares"],
+            "Cost Basis": row["Cost Basis"],
+            "Exchange Rate": row["Exchange Rate"],
+            "Affect Cash": "TRUE",
+        })
+    return pd.DataFrame(rows, columns=SAMPLE_COLUMNS)
+
+
+def csv_download_bytes(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False).encode("utf-8-sig")
+
+
+init_state()
+
+st.title("Portfolio Image/CSV to Sample Import CSV")
+st.caption("Upload an image, paste text, or upload CSV. Default base is C$1,000,000.")
 
 with st.sidebar:
-    st.header("Settings")
-    trade_date = st.date_input("Trade date", value=date.today())
-    base_cad = st.number_input("Base portfolio (CAD)", min_value=1_000.0, value=1_000_000.0, step=10_000.0)
-    fx_cadusd = st.number_input(
-        "CAD/USD exchange rate",
-        min_value=0.50,
-        max_value=1.50,
-        value=0.73,
-        step=0.0001,
-        help="Use USD per 1 CAD, like the sample file.",
+    total_cad = st.number_input("Base portfolio (CAD)", min_value=1000.0, value=float(DEFAULT_TOTAL_CAD), step=10000.0)
+    if st.checkbox("Auto-fetch USD/CAD", value=True):
+        st.session_state["usd_cad"] = get_fx_usd_cad()
+    usd_cad = st.number_input("USD/CAD", min_value=0.5, max_value=3.0, value=float(st.session_state["usd_cad"]), step=0.01, format="%.6f")
+    as_of_date = st.date_input("Trade date")
+
+tab1, tab2, tab3 = st.tabs(["Image or Text", "CSV Upload", "Review and Export"])
+
+with tab1:
+    image_file = st.file_uploader("Upload image", type=["png", "jpg", "jpeg", "webp"])
+    pasted_text = st.text_area("Or paste portfolio text", height=220)
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Load default portfolio"):
+            st.session_state["holdings_df"] = pd.DataFrame(DEFAULT_PORTFOLIO, columns=["Ticker", "Name", "Weight %"])
+            st.success("Default portfolio loaded.")
+    with c2:
+        if st.button("Parse image/text"):
+            extracted = ""
+            if image_file is not None:
+                image = Image.open(image_file)
+                st.image(image, use_container_width=True)
+                extracted = image_to_text(image)
+                if extracted:
+                    st.text_area("OCR result", extracted, height=220)
+            source = pasted_text.strip() or extracted
+            parsed = parse_text_portfolio(source) if source else pd.DataFrame(columns=["Ticker", "Name", "Weight %"])
+            if parsed.empty:
+                st.warning("Could not parse rows reliably. You can still edit manually in the Review tab.")
+            else:
+                st.session_state["holdings_df"] = parsed
+                st.success(f"Parsed {len(parsed)} rows.")
+    if not OCR_AVAILABLE:
+        st.info("Image OCR activates after installing requirements.")
+
+with tab2:
+    csv_file = st.file_uploader("Upload CSV", type=["csv"], key="csvup")
+    if csv_file is not None:
+        df_csv = pd.read_csv(csv_file)
+        st.dataframe(df_csv, use_container_width=True)
+        cols = list(df_csv.columns)
+        if cols:
+            ticker_col = st.selectbox("Ticker column", cols, index=0)
+            name_col = st.selectbox("Name column", cols, index=min(1, len(cols)-1))
+            weight_col = st.selectbox("Weight column", cols, index=min(2, len(cols)-1))
+            if st.button("Load CSV"):
+                mapped = pd.DataFrame({
+                    "Ticker": df_csv[ticker_col].astype(str).map(normalize_ticker),
+                    "Name": df_csv[name_col].astype(str),
+                    "Weight %": df_csv[weight_col].map(clean_weight),
+                }).dropna(subset=["Ticker", "Weight %"]).reset_index(drop=True)
+                st.session_state["holdings_df"] = mapped
+                st.success(f"Loaded {len(mapped)} rows.")
+
+with tab3:
+    edited = st.data_editor(
+        st.session_state["holdings_df"],
+        num_rows="dynamic",
+        use_container_width=True,
+        key="holdings_editor",
     )
-    st.markdown("---")
-    auto_fetch = st.checkbox("Try to fetch latest prices with yfinance", value=True)
+    edited["Ticker"] = edited["Ticker"].astype(str).map(normalize_ticker)
+    edited["Weight %"] = pd.to_numeric(edited["Weight %"], errors="coerce")
+    edited = edited.dropna(subset=["Ticker", "Weight %"]).reset_index(drop=True)
 
-st.subheader("1) Portfolio weights")
-portfolio_df = st.data_editor(
-    default_df(),
-    num_rows="dynamic",
-    use_container_width=True,
-    column_config={
-        "Ticker": st.column_config.TextColumn(required=True),
-        "Name": st.column_config.TextColumn(required=False),
-        "Weight %": st.column_config.NumberColumn(format="%.2f"),
-    },
-)
+    st.write(f"Weight total: {edited['Weight %'].sum():.2f}%")
 
-uploaded = st.file_uploader("Or upload a CSV with columns like Ticker / Weight %", type=["csv"])
-if uploaded is not None:
-    try:
-        up = pd.read_csv(uploaded)
-        cols = {c.lower().strip(): c for c in up.columns}
-        ticker_col = cols.get("ticker") or cols.get("symbol")
-        weight_col = cols.get("weight %") or cols.get("weight") or cols.get("allocation")
-        name_col = cols.get("name") or cols.get("company")
-        if ticker_col and weight_col:
-            portfolio_df = pd.DataFrame({
-                "Ticker": up[ticker_col],
-                "Name": up[name_col] if name_col else "",
-                "Weight %": up[weight_col],
-            })
-            st.success("Uploaded portfolio loaded.")
-            st.dataframe(portfolio_df, use_container_width=True)
-        else:
-            st.warning("Upload needs at least a ticker column and a weight column.")
-    except Exception as e:
-        st.error(f"Could not read upload: {e}")
+    if st.button("Fetch prices"):
+        st.session_state["priced_df"] = build_prices(edited, usd_cad)
 
-st.subheader("2) Prices")
-prices = {}
-auto_fx = None
-if auto_fetch:
-    with st.spinner("Fetching prices..."):
-        prices, auto_fx = fetch_last_prices(portfolio_df)
-    if auto_fx:
-        fx_cadusd = auto_fx
-        st.info(f"Auto-updated CAD/USD to {fx_cadusd:.6f}")
+    if "priced_df" in st.session_state:
+        priced = st.data_editor(st.session_state["priced_df"], num_rows="dynamic", use_container_width=True, key="priced_editor")
+        allocated, residual_cash = allocate_portfolio(priced, total_cad)
+        sample_csv = to_sample_csv(allocated, str(as_of_date))
 
-price_rows = []
-for t in portfolio_df["Ticker"].astype(str).str.upper().str.strip():
-    if t == "CAD" or not t:
-        continue
-    meta = classify_ticker(t)
-    price_rows.append({
-        "Ticker": t,
-        "Country": meta["country"],
-        "MIC": meta["mic"],
-        "Last Price": prices.get(t, None),
-    })
+        c1, c2 = st.columns(2)
+        c1.metric("Residual cash", f"C${residual_cash:,.2f}")
+        c2.metric("Rows", len(sample_csv))
 
-price_df = pd.DataFrame(price_rows).drop_duplicates(subset=["Ticker"])
-price_df = st.data_editor(
-    price_df,
-    num_rows="fixed",
-    use_container_width=True,
-    column_config={"Last Price": st.column_config.NumberColumn(format="%.4f")},
-    key="price_editor",
-)
-
-manual_prices = {str(r["Ticker"]).upper(): float(r["Last Price"]) for _, r in price_df.iterrows() if pd.notna(r["Last Price"])}
-
-missing = [t for t in portfolio_df["Ticker"].astype(str).str.upper() if t != "CAD" and t not in manual_prices]
-if missing:
-    st.warning("Missing prices for: " + ", ".join(sorted(set(missing))))
-
-st.subheader("3) Build import file")
-if st.button("Generate sample-format CSV", type="primary"):
-    import_df, summary_df = build_import(portfolio_df, trade_date, float(base_cad), float(fx_cadusd), manual_prices)
-
-    if import_df.empty:
-        st.error("No rows were generated. Add prices for the missing tickers and try again.")
-    else:
-        st.success("Import file generated.")
-        c1, c2 = st.columns([2, 1])
-        with c1:
-            st.dataframe(import_df, use_container_width=True)
-        with c2:
-            st.dataframe(summary_df, use_container_width=True)
+        st.dataframe(allocated[["Ticker", "Name", "Weight %", "Price", "Currency", "Exchange Rate", "Shares", "Allocated CAD"]], use_container_width=True)
+        st.dataframe(sample_csv, use_container_width=True)
 
         st.download_button(
-            "Download import CSV",
-            data=to_csv_bytes(import_df),
-            file_name="portfolio_import_sample_format.csv",
-            mime="text/csv",
-        )
-        st.download_button(
-            "Download summary CSV",
-            data=to_csv_bytes(summary_df),
-            file_name="portfolio_import_summary.csv",
+            "Download CSV",
+            data=csv_download_bytes(sample_csv),
+            file_name="portfolio_import_from_image_or_csv.csv",
             mime="text/csv",
         )
 
-st.markdown("---")
-st.markdown("**Notes**")
-st.markdown(
-    "- The app keeps the exact sample columns.  \n"
-    "- U.S. rows get an exchange rate; Canadian rows leave it blank.  \n"
-    "- Share counts are rounded down to whole shares. Any leftover amount stays as residual cash in the summary.  \n"
-    "- You can overwrite any fetched price before generating the file."
-)
+        excel_buffer = io.BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+            allocated.to_excel(writer, sheet_name="Allocation", index=False)
+            sample_csv.to_excel(writer, sheet_name="Import CSV", index=False)
+        excel_buffer.seek(0)
+        st.download_button(
+            "Download Excel summary",
+            data=excel_buffer.getvalue(),
+            file_name="portfolio_import_summary.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
