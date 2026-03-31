@@ -7,10 +7,11 @@ from typing import List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
-from PIL import Image, ImageOps
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 try:
     from rapidocr_onnxruntime import RapidOCR
+
     OCR_AVAILABLE = True
 except Exception:
     RapidOCR = None
@@ -87,6 +88,8 @@ def init_state():
         st.session_state["usd_cad"] = 1.37
     if "priced_df" not in st.session_state:
         st.session_state["priced_df"] = None
+    if "ocr_text" not in st.session_state:
+        st.session_state["ocr_text"] = ""
 
 
 def clean_weight(value) -> Optional[float]:
@@ -106,53 +109,130 @@ def normalize_ticker(ticker: str) -> str:
     t = (ticker or "").upper().strip().replace(" ", "")
     t = t.replace("BRK/B", "BRK.B").replace("BRK-B", "BRK.B")
     t = t.replace("TECK-B", "TECK.B").replace("CCL-B", "CCL.B")
+    t = t.replace("SHOPTO", "SHOP").replace("SHOP.TO", "SHOP")
     return t
+
+
+def prettify_name(name: str, ticker: str) -> str:
+    name = re.sub(r"\s+", " ", (name or "")).strip(" -|:")
+    if not name:
+        return ticker
+    return name
 
 
 def parse_text_portfolio(raw_text: str) -> pd.DataFrame:
     rows: List[Tuple[str, str, float]] = []
     seen = set()
 
-    for raw_line in raw_text.splitlines():
-        line = re.sub(r"\s+", " ", raw_line).strip()
-        if not line:
-            continue
+    lines = [re.sub(r"\s+", " ", line).strip() for line in raw_text.splitlines()]
+    lines = [line for line in lines if line]
 
-        weight_match = re.search(r"(\d+[.,]?\d*)\s*%?$", line)
+    for i, line in enumerate(lines):
+        working_line = line
+
+        percent_match = re.search(r"(\d+(?:[.,]\d+)?)\s*%", working_line)
+        trailing_match = re.search(r"(\d+(?:[.,]\d+)?)\s*$", working_line)
+
+        weight_match = percent_match or trailing_match
+
+        # If no weight on this line, try next line
+        if not weight_match and i + 1 < len(lines):
+            combined = f"{working_line} {lines[i + 1]}"
+            percent_match = re.search(r"(\d+(?:[.,]\d+)?)\s*%", combined)
+            trailing_match = re.search(r"(\d+(?:[.,]\d+)?)\s*$", combined)
+            weight_match = percent_match or trailing_match
+            if weight_match:
+                working_line = combined
+
         if not weight_match:
             continue
 
         weight = clean_weight(weight_match.group(1))
-        if weight is None:
+        if weight is None or weight <= 0:
+            continue
+        if weight > 100:
             continue
 
-        left = line[:weight_match.start()].strip()
-        ticker_match = re.match(r"^([A-Z][A-Z0-9.\-]{0,9})\b", left)
-        if not ticker_match:
+        # Look for known mapped tickers first
+        ticker = None
+        for known in sorted(TICKER_MAP.keys(), key=len, reverse=True):
+            if known == "CAD":
+                continue
+            if re.search(rf"\b{re.escape(known)}\b", working_line, re.IGNORECASE):
+                ticker = known
+                break
+
+        # Generic ticker fallback
+        if not ticker:
+            generic = re.search(r"\b([A-Z]{1,5}(?:[.\-][A-Z])?)\b", working_line.upper())
+            if generic:
+                ticker = normalize_ticker(generic.group(1))
+
+        if not ticker:
             continue
 
-        ticker = normalize_ticker(ticker_match.group(1))
-        name = left[ticker_match.end():].strip(" -|:") or ticker
+        # Remove ticker and weight to get a cleaner name
+        name = working_line
+        name = re.sub(rf"\b{re.escape(ticker)}\b", "", name, count=1, flags=re.IGNORECASE)
+        name = re.sub(r"(\d+(?:[.,]\d+)?)\s*%?", "", name, count=1)
+        name = prettify_name(name, ticker)
 
         key = (ticker, round(weight, 4))
         if key in seen:
             continue
+
         seen.add(key)
         rows.append((ticker, name, weight))
 
-    return pd.DataFrame(rows, columns=["Ticker", "Name", "Weight %"])
+    df = pd.DataFrame(rows, columns=["Ticker", "Name", "Weight %"])
+
+    if not df.empty:
+        df = (
+            df.groupby(["Ticker", "Name"], as_index=False)["Weight %"]
+            .sum()
+            .sort_values("Weight %", ascending=False)
+            .reset_index(drop=True)
+        )
+
+    return df
+
+
+def preprocess_image_for_ocr(image: Image.Image) -> Image.Image:
+    img = image.convert("RGB")
+    img = ImageOps.exif_transpose(img)
+    img = ImageOps.grayscale(img)
+
+    w, h = img.size
+    if max(w, h) < 1800:
+        img = img.resize((w * 2, h * 2))
+
+    img = ImageEnhance.Contrast(img).enhance(2.0)
+    img = img.filter(ImageFilter.SHARPEN)
+    img = img.point(lambda p: 255 if p > 170 else 0)
+
+    return img
 
 
 def image_to_text(image: Image.Image) -> str:
     if not OCR_AVAILABLE:
         return ""
+
     try:
         engine = RapidOCR()
-        gray = ImageOps.grayscale(image)
-        result, _ = engine(gray)
+        processed = preprocess_image_for_ocr(image)
+        result, _ = engine(processed)
+
         if not result:
             return ""
-        return "\n".join([item[1] for item in result if item and len(item) > 1 and item[1]])
+
+        lines = []
+        for item in result:
+            if item and len(item) > 1 and item[1]:
+                txt = str(item[1]).strip()
+                if txt:
+                    lines.append(txt)
+
+        return "\n".join(lines)
     except Exception:
         return ""
 
@@ -198,7 +278,7 @@ def fetch_last_price_stooq(symbol: Optional[str]) -> Optional[float]:
             return None
         last = rows[-1]
         close_val = last.get("Close") or last.get("close")
-        if close_val and close_val.lower() != "null":
+        if close_val and str(close_val).lower() != "null":
             px = float(close_val)
             if px > 0:
                 return px
@@ -213,8 +293,10 @@ def build_prices(df: pd.DataFrame, usd_cad: float) -> pd.DataFrame:
 
     for tkr in out["Ticker"]:
         meta = TICKER_MAP.get(
-            tkr, {"stooq": None, "mic": "", "country": "", "currency": "USD"}
+            tkr,
+            {"stooq": None, "mic": "", "country": "", "currency": "USD"},
         )
+
         if tkr == "CAD":
             price = 1.0
         else:
@@ -274,21 +356,25 @@ def allocate_portfolio(df: pd.DataFrame, total_cad: float):
         out.loc[cash_mask, "Cost Basis"] = residual_cash
         out.loc[cash_mask, "Allocated CAD"] = residual_cash
     else:
-        cash_row = pd.DataFrame([{
-            "Ticker": "CAD",
-            "Name": "Cash",
-            "Weight %": 0.0,
-            "Target CAD": 0.0,
-            "Remote Symbol": None,
-            "Currency": "CAD",
-            "Price": 1.0,
-            "MIC": "XOTC",
-            "Listing Country": "CA",
-            "Exchange Rate": 1.0,
-            "Shares": 0,
-            "Cost Basis": residual_cash,
-            "Allocated CAD": residual_cash,
-        }])
+        cash_row = pd.DataFrame(
+            [
+                {
+                    "Ticker": "CAD",
+                    "Name": "Cash",
+                    "Weight %": 0.0,
+                    "Target CAD": 0.0,
+                    "Remote Symbol": None,
+                    "Currency": "CAD",
+                    "Price": 1.0,
+                    "MIC": "XOTC",
+                    "Listing Country": "CA",
+                    "Exchange Rate": 1.0,
+                    "Shares": 0,
+                    "Cost Basis": residual_cash,
+                    "Allocated CAD": residual_cash,
+                }
+            ]
+        )
         out = pd.concat([out, cash_row], ignore_index=True)
 
     return out, residual_cash
@@ -324,7 +410,7 @@ st.title("Portfolio Image/CSV to Sample Import CSV")
 st.caption("Starts empty. Upload an image, paste text, or upload CSV. Base portfolio defaults to C$1,000,000.")
 
 if not OCR_AVAILABLE:
-    st.info("OCR package is not installed. Image upload still works, but text extraction from images is disabled.")
+    st.warning("OCR package is not installed. Image upload works, but text extraction from images is disabled.")
 
 with st.sidebar:
     total_cad = st.number_input(
@@ -353,7 +439,9 @@ tab1, tab2, tab3 = st.tabs(["Image / Text", "CSV Upload", "Review & Export"])
 
 with tab1:
     uploaded_image = st.file_uploader(
-        "Upload screenshot/image", type=["png", "jpg", "jpeg", "webp"], key="img_upl"
+        "Upload screenshot/image",
+        type=["png", "jpg", "jpeg", "webp"],
+        key="img_upl",
     )
     pasted_text = st.text_area("Or paste text directly", height=220)
 
@@ -364,117 +452,105 @@ with tab1:
         if uploaded_image is not None:
             image = Image.open(uploaded_image)
             st.image(image, caption="Uploaded image", use_container_width=True)
-            ocr_text = image_to_text(image)
-            if ocr_text:
-                st.text_area("OCR text", value=ocr_text, height=220)
+
+            if OCR_AVAILABLE:
+                ocr_text = image_to_text(image)
+                st.session_state["ocr_text"] = ocr_text
 
         source_text = pasted_text.strip() if pasted_text.strip() else ocr_text
+
         if source_text:
             parsed_df = parse_text_portfolio(source_text)
-
-        if parsed_df.empty:
-            st.warning("Nothing reliable was parsed. You can still edit the table manually in the Review tab.")
+            if parsed_df.empty:
+                st.warning("Nothing reliable was parsed. You can still edit the table manually in the Review tab.")
+            else:
+                st.success(f"Parsed {len(parsed_df)} holding(s).")
+                st.session_state["holdings_df"] = parsed_df
         else:
-            st.session_state["holdings_df"] = parsed_df
-            st.success(f"Parsed {len(parsed_df)} rows.")
+            st.warning("No usable text found from image or pasted text.")
+
+    if st.session_state.get("ocr_text"):
+        st.text_area("OCR text", value=st.session_state["ocr_text"], height=220)
 
 with tab2:
     uploaded_csv = st.file_uploader("Upload CSV", type=["csv"], key="csv_upl")
+
     if uploaded_csv is not None:
-        df_csv = pd.read_csv(uploaded_csv)
-        st.dataframe(df_csv, use_container_width=True)
+        try:
+            df_csv = pd.read_csv(uploaded_csv)
+            lower_map = {c.lower().strip(): c for c in df_csv.columns}
 
-        cols = list(df_csv.columns)
-        if cols:
-            c1, c2, c3 = st.columns(3)
-            ticker_col = c1.selectbox("Ticker column", cols, index=0)
-            name_col = c2.selectbox("Name column", cols, index=min(1, len(cols) - 1))
-            weight_col = c3.selectbox("Weight column", cols, index=min(2, len(cols) - 1))
+            ticker_col = lower_map.get("ticker")
+            name_col = lower_map.get("name")
+            weight_col = lower_map.get("weight %") or lower_map.get("weight") or lower_map.get("portfolio %")
 
-            if st.button("Load CSV into holdings"):
-                mapped = pd.DataFrame(
+            if ticker_col and weight_col:
+                clean_df = pd.DataFrame(
                     {
                         "Ticker": df_csv[ticker_col].astype(str).map(normalize_ticker),
-                        "Name": df_csv[name_col].astype(str),
+                        "Name": df_csv[name_col].astype(str) if name_col else df_csv[ticker_col].astype(str),
                         "Weight %": df_csv[weight_col].map(clean_weight),
                     }
-                ).dropna(subset=["Ticker", "Weight %"]).reset_index(drop=True)
+                )
+                clean_df = clean_df.dropna(subset=["Ticker", "Weight %"])
+                clean_df = clean_df[clean_df["Ticker"].astype(str).str.len() > 0].reset_index(drop=True)
 
-                st.session_state["holdings_df"] = mapped
-                st.success(f"Loaded {len(mapped)} rows from CSV.")
+                st.session_state["holdings_df"] = clean_df
+                st.success(f"Loaded {len(clean_df)} holding(s) from CSV.")
+            else:
+                st.error("CSV must contain at least Ticker and Weight columns.")
+        except Exception as e:
+            st.error(f"Could not read CSV: {e}")
 
 with tab3:
-    edited = st.data_editor(
-        st.session_state["holdings_df"],
+    st.subheader("Holdings")
+
+    holdings_df = st.session_state["holdings_df"].copy()
+    edited_df = st.data_editor(
+        holdings_df,
         num_rows="dynamic",
         use_container_width=True,
         key="holdings_editor",
     )
+    st.session_state["holdings_df"] = edited_df
 
-    if not edited.empty:
-        edited["Ticker"] = edited["Ticker"].astype(str).map(normalize_ticker)
-        edited["Weight %"] = pd.to_numeric(edited["Weight %"], errors="coerce")
-        edited = edited.dropna(subset=["Ticker", "Weight %"]).reset_index(drop=True)
+    col_a, col_b = st.columns(2)
 
-    st.metric("Weight total", f"{edited['Weight %'].sum() if not edited.empty else 0:.2f}%")
+    with col_a:
+        if st.button("Fetch prices & allocate"):
+            base_df = st.session_state["holdings_df"].copy()
 
-    if st.button("Build pricing table"):
-        if edited.empty:
-            st.warning("Please upload or enter holdings first.")
-        else:
-            st.session_state["priced_df"] = build_prices(edited, usd_cad)
+            if base_df.empty:
+                st.warning("Please add at least one holding first.")
+            else:
+                base_df["Ticker"] = base_df["Ticker"].astype(str).map(normalize_ticker)
+                base_df["Weight %"] = base_df["Weight %"].map(clean_weight)
+                base_df = base_df.dropna(subset=["Ticker", "Weight %"]).reset_index(drop=True)
+
+                priced_df = build_prices(base_df, usd_cad)
+                allocated_df, residual_cash = allocate_portfolio(priced_df, total_cad)
+                st.session_state["priced_df"] = allocated_df
+
+                st.success(f"Done. Residual cash: C${residual_cash:,.2f}")
+
+    with col_b:
+        if st.button("Clear all"):
+            st.session_state["holdings_df"] = pd.DataFrame(columns=["Ticker", "Name", "Weight %"])
+            st.session_state["priced_df"] = None
+            st.session_state["ocr_text"] = ""
+            st.rerun()
 
     if st.session_state["priced_df"] is not None:
-        st.caption("Rows with Price = 0 usually mean the remote source did not match that ticker.")
+        st.subheader("Priced / Allocated")
+        st.dataframe(st.session_state["priced_df"], use_container_width=True)
 
-        priced = st.data_editor(
-            st.session_state["priced_df"],
-            num_rows="dynamic",
-            use_container_width=True,
-            key="priced_editor",
-        )
-
-        allocated, residual_cash = allocate_portfolio(priced, total_cad)
-        sample_csv = to_sample_csv(allocated, str(as_of_date))
-
-        c1, c2 = st.columns(2)
-        c1.metric("Residual cash", f"C${residual_cash:,.2f}")
-        c2.metric("Rows", len(sample_csv))
-
-        st.dataframe(
-            allocated[
-                [
-                    "Ticker",
-                    "Name",
-                    "Weight %",
-                    "Price",
-                    "Currency",
-                    "Exchange Rate",
-                    "Shares",
-                    "Allocated CAD",
-                ]
-            ],
-            use_container_width=True,
-        )
-
-        st.dataframe(sample_csv, use_container_width=True)
+        sample_df = to_sample_csv(st.session_state["priced_df"], str(as_of_date))
+        st.subheader("Sample Import CSV Preview")
+        st.dataframe(sample_df, use_container_width=True)
 
         st.download_button(
-            "Download import CSV",
-            data=csv_bytes(sample_csv),
-            file_name="portfolio_import_from_image_or_csv.csv",
+            "Download sample_import.csv",
+            data=csv_bytes(sample_df),
+            file_name="sample_import.csv",
             mime="text/csv",
-        )
-
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            allocated.to_excel(writer, sheet_name="Allocation", index=False)
-            sample_csv.to_excel(writer, sheet_name="Import CSV", index=False)
-        output.seek(0)
-
-        st.download_button(
-            "Download Excel summary",
-            data=output.getvalue(),
-            file_name="portfolio_import_summary.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
