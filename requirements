@@ -1,4 +1,6 @@
-streamlit>=1.42.0
-pandas>=2.2.0
-yfinance>=0.2.54
-openpyxl>=3.1.5
+streamlit
+pandas
+yfinance
+pillow
+openpyxl
+rapidocr-onnxruntime
