@@ -1,11 +1,13 @@
+import csv
 import io
 import re
+import urllib.parse
+import urllib.request
 from typing import List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
 from PIL import Image, ImageOps
-import yfinance as yf
 
 try:
     from rapidocr_onnxruntime import RapidOCR
@@ -73,47 +75,53 @@ SAMPLE_COLUMNS = [
     "Affect Cash",
 ]
 
+# Stooq suffix assumptions for last-price fetch
+# US -> .us, Canada -> .ca
 TICKER_MAP = {
-    "CCL.B": {"yf": "CCL.B.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
-    "TECK.B": {"yf": "TECK-B.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
-    "WSP": {"yf": "WSP.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
-    "NTR": {"yf": "NTR.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
-    "ATRL": {"yf": "ATRL.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
-    "MRU": {"yf": "MRU.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
-    "NA": {"yf": "NA.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
-    "T": {"yf": "T.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
-    "BCE": {"yf": "BCE.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
-    "ARX": {"yf": "ARX.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
-    "TFII": {"yf": "TFII.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
-    "CVE": {"yf": "CVE.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
-    "ENB": {"yf": "ENB.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
-    "RY": {"yf": "RY.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
-    "TD": {"yf": "TD.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
-    "ATD": {"yf": "ATD.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
-    "FLEM": {"yf": "FLEM.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
-    "FGDL": {"yf": "FGDL.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
-    "FHIS": {"yf": "FHIS.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
-    "EQY": {"yf": "EQY.TO", "mic": "XTSE", "country": "CA", "currency": "CAD"},
-    "META": {"yf": "META", "mic": "XNAS", "country": "US", "currency": "USD"},
-    "ETN": {"yf": "ETN", "mic": "XNYS", "country": "US", "currency": "USD"},
-    "AVGO": {"yf": "AVGO", "mic": "XNAS", "country": "US", "currency": "USD"},
-    "MCD": {"yf": "MCD", "mic": "XNYS", "country": "US", "currency": "USD"},
-    "JPM": {"yf": "JPM", "mic": "XNYS", "country": "US", "currency": "USD"},
-    "NKE": {"yf": "NKE", "mic": "XNYS", "country": "US", "currency": "USD"},
-    "UNH": {"yf": "UNH", "mic": "XNYS", "country": "US", "currency": "USD"},
-    "MA": {"yf": "MA", "mic": "XNYS", "country": "US", "currency": "USD"},
-    "WCN": {"yf": "WCN", "mic": "XNYS", "country": "CA", "currency": "USD"},
-    "GSK": {"yf": "GSK", "mic": "XNYS", "country": "GB", "currency": "USD"},
-    "AAPL": {"yf": "AAPL", "mic": "XNAS", "country": "US", "currency": "USD"},
-    "MSFT": {"yf": "MSFT", "mic": "XNAS", "country": "US", "currency": "USD"},
-    "WMT": {"yf": "WMT", "mic": "XNYS", "country": "US", "currency": "USD"},
-    "AMZN": {"yf": "AMZN", "mic": "XNAS", "country": "US", "currency": "USD"},
-    "TSM": {"yf": "TSM", "mic": "XNYS", "country": "TW", "currency": "USD"},
-    "GOOGL": {"yf": "GOOGL", "mic": "XNAS", "country": "US", "currency": "USD"},
-    "BRK.B": {"yf": "BRK-B", "mic": "XNYS", "country": "US", "currency": "USD"},
-    "CAD": {"yf": None, "mic": "XOTC", "country": "CA", "currency": "CAD"},
+    "CCL.B": {"stooq": "ccl-b.ca", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "TECK.B": {"stooq": "teck-b.ca", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "WSP": {"stooq": "wsp.ca", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "NTR": {"stooq": "ntr.ca", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "ATRL": {"stooq": "atrl.ca", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "MRU": {"stooq": "mru.ca", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "NA": {"stooq": "na.ca", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "T": {"stooq": "t.ca", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "BCE": {"stooq": "bce.ca", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "ARX": {"stooq": "arx.ca", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "TFII": {"stooq": "tfii.ca", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "CVE": {"stooq": "cve.ca", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "ENB": {"stooq": "enb.ca", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "RY": {"stooq": "ry.ca", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "TD": {"stooq": "td.ca", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "ATD": {"stooq": "atd.ca", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "FLEM": {"stooq": "flem.ca", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "FGDL": {"stooq": "fgdl.ca", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "FHIS": {"stooq": "fhis.ca", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "EQY": {"stooq": "eqy.ca", "mic": "XTSE", "country": "CA", "currency": "CAD"},
+    "META": {"stooq": "meta.us", "mic": "XNAS", "country": "US", "currency": "USD"},
+    "ETN": {"stooq": "etn.us", "mic": "XNYS", "country": "US", "currency": "USD"},
+    "AVGO": {"stooq": "avgo.us", "mic": "XNAS", "country": "US", "currency": "USD"},
+    "MCD": {"stooq": "mcd.us", "mic": "XNYS", "country": "US", "currency": "USD"},
+    "JPM": {"stooq": "jpm.us", "mic": "XNYS", "country": "US", "currency": "USD"},
+    "NKE": {"stooq": "nke.us", "mic": "XNYS", "country": "US", "currency": "USD"},
+    "UNH": {"stooq": "unh.us", "mic": "XNYS", "country": "US", "currency": "USD"},
+    "MA": {"stooq": "ma.us", "mic": "XNYS", "country": "US", "currency": "USD"},
+    "WCN": {"stooq": "wcn.us", "mic": "XNYS", "country": "CA", "currency": "USD"},
+    "GSK": {"stooq": "gsk.us", "mic": "XNYS", "country": "GB", "currency": "USD"},
+    "AAPL": {"stooq": "aapl.us", "mic": "XNAS", "country": "US", "currency": "USD"},
+    "MSFT": {"stooq": "msft.us", "mic": "XNAS", "country": "US", "currency": "USD"},
+    "WMT": {"stooq": "wmt.us", "mic": "XNYS", "country": "US", "currency": "USD"},
+    "AMZN": {"stooq": "amzn.us", "mic": "XNAS", "country": "US", "currency": "USD"},
+    "TSM": {"stooq": "tsm.us", "mic": "XNYS", "country": "TW", "currency": "USD"},
+    "GOOGL": {"stooq": "googl.us", "mic": "XNAS", "country": "US", "currency": "USD"},
+    "BRK.B": {"stooq": "brk-b.us", "mic": "XNYS", "country": "US", "currency": "USD"},
+    "CAD": {"stooq": None, "mic": "XOTC", "country": "CA", "currency": "CAD"},
 }
 
+# Fallback manual price hints for common names if remote fetch misses.
+PRICE_FALLBACKS = {
+    "CAD": 1.0,
+}
 
 def init_state():
     if "holdings_df" not in st.session_state:
@@ -124,7 +132,6 @@ def init_state():
         st.session_state["usd_cad"] = 1.37
     if "priced_df" not in st.session_state:
         st.session_state["priced_df"] = None
-
 
 def clean_weight(value) -> Optional[float]:
     if value is None:
@@ -138,13 +145,11 @@ def clean_weight(value) -> Optional[float]:
     except Exception:
         return None
 
-
 def normalize_ticker(ticker: str) -> str:
     t = (ticker or "").upper().strip().replace(" ", "")
     t = t.replace("BRK/B", "BRK.B").replace("BRK-B", "BRK.B")
     t = t.replace("TECK-B", "TECK.B").replace("CCL-B", "CCL.B")
     return t
-
 
 def parse_text_portfolio(raw_text: str) -> pd.DataFrame:
     rows: List[Tuple[str, str, float]] = []
@@ -179,7 +184,6 @@ def parse_text_portfolio(raw_text: str) -> pd.DataFrame:
 
     return pd.DataFrame(rows, columns=["Ticker", "Name", "Weight %"])
 
-
 def image_to_text(image: Image.Image) -> str:
     if not OCR_AVAILABLE:
         return ""
@@ -195,32 +199,53 @@ def image_to_text(image: Image.Image) -> str:
     except Exception:
         return ""
 
+@st.cache_data(show_spinner=False)
+def fetch_text(url: str, timeout: int = 15) -> str:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "text/plain,text/csv,text/html,*/*",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="ignore")
 
 @st.cache_data(show_spinner=False)
 def get_fx_usd_cad() -> float:
-    fx = yf.Ticker("CADUSD=X")
-    hist = fx.history(period="5d")
-    if not hist.empty:
-        cadusd = float(hist["Close"].dropna().iloc[-1])
-        if cadusd > 0:
-            return round(1 / cadusd, 6)
+    # exchangerate.host simple endpoint, no Python package needed
+    try:
+        url = "https://api.exchangerate.host/convert?from=USD&to=CAD&amount=1"
+        text = fetch_text(url)
+        m = re.search(r'"result"\s*:\s*([0-9.]+)', text)
+        if m:
+            value = float(m.group(1))
+            if value > 0:
+                return round(value, 6)
+    except Exception:
+        pass
     return 1.37
 
-
 @st.cache_data(show_spinner=False)
-def fetch_last_price(yf_symbol: Optional[str]) -> Optional[float]:
-    if not yf_symbol:
+def fetch_last_price_stooq(symbol: Optional[str]) -> Optional[float]:
+    if not symbol:
         return None
     try:
-        ticker = yf.Ticker(yf_symbol)
-        hist = ticker.history(period="5d", auto_adjust=False)
-        closes = hist["Close"].dropna()
-        if not closes.empty:
-            return float(closes.iloc[-1])
+        query = urllib.parse.quote(symbol.lower())
+        url = f"https://stooq.com/q/d/l/?s={query}&i=d"
+        text = fetch_text(url)
+        rows = list(csv.DictReader(io.StringIO(text)))
+        if not rows:
+            return None
+        last = rows[-1]
+        close_val = last.get("Close") or last.get("close")
+        if close_val and close_val.lower() != "null":
+            px = float(close_val)
+            if px > 0:
+                return px
     except Exception:
         return None
     return None
-
 
 def build_prices(df: pd.DataFrame, usd_cad: float) -> pd.DataFrame:
     out = df.copy()
@@ -228,14 +253,20 @@ def build_prices(df: pd.DataFrame, usd_cad: float) -> pd.DataFrame:
 
     for tkr in out["Ticker"]:
         meta = TICKER_MAP.get(
-            tkr, {"yf": tkr, "mic": "", "country": "", "currency": "USD"}
+            tkr, {"stooq": None, "mic": "", "country": "", "currency": "USD"}
         )
-        price = None if tkr == "CAD" else fetch_last_price(meta["yf"])
+        if tkr == "CAD":
+            price = 1.0
+        else:
+            price = fetch_last_price_stooq(meta["stooq"])
+            if price is None:
+                price = PRICE_FALLBACKS.get(tkr, 0.0)
+
         meta_rows.append(
             {
-                "Yahoo Symbol": meta["yf"],
+                "Remote Symbol": meta["stooq"],
                 "Currency": meta["currency"],
-                "Price": price if price is not None else 0.0,
+                "Price": price,
                 "MIC": meta["mic"],
                 "Listing Country": meta["country"],
                 "Exchange Rate": 1.0 if meta["currency"] == "CAD" else usd_cad,
@@ -243,7 +274,6 @@ def build_prices(df: pd.DataFrame, usd_cad: float) -> pd.DataFrame:
         )
 
     return pd.concat([out.reset_index(drop=True), pd.DataFrame(meta_rows)], axis=1)
-
 
 def allocate_portfolio(df: pd.DataFrame, total_cad: float):
     out = df.copy()
@@ -283,7 +313,6 @@ def allocate_portfolio(df: pd.DataFrame, total_cad: float):
 
     return out, residual_cash
 
-
 def to_sample_csv(df: pd.DataFrame, as_of_date: str) -> pd.DataFrame:
     rows = []
     for _, row in df.iterrows():
@@ -303,15 +332,16 @@ def to_sample_csv(df: pd.DataFrame, as_of_date: str) -> pd.DataFrame:
         )
     return pd.DataFrame(rows, columns=SAMPLE_COLUMNS)
 
-
 def csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8-sig")
-
 
 init_state()
 
 st.title("Portfolio Image/CSV to Sample Import CSV")
 st.caption("Reads from image, pasted text, or CSV. Default base is C$1,000,000.")
+
+if not OCR_AVAILABLE:
+    st.info("OCR package is not installed. Image upload still works, but text extraction from images is disabled.")
 
 with st.sidebar:
     total_cad = st.number_input(
@@ -370,9 +400,7 @@ with tab1:
                 parsed_df = parse_text_portfolio(source_text)
 
             if parsed_df.empty:
-                st.warning(
-                    "Nothing reliable was parsed. You can still edit the table manually in the Review tab."
-                )
+                st.warning("Nothing reliable was parsed. You can still edit the table manually in the Review tab.")
             else:
                 st.session_state["holdings_df"] = parsed_df
                 st.success(f"Parsed {len(parsed_df)} rows.")
@@ -388,9 +416,7 @@ with tab2:
             c1, c2, c3 = st.columns(3)
             ticker_col = c1.selectbox("Ticker column", cols, index=0)
             name_col = c2.selectbox("Name column", cols, index=min(1, len(cols) - 1))
-            weight_col = c3.selectbox(
-                "Weight column", cols, index=min(2, len(cols) - 1)
-            )
+            weight_col = c3.selectbox("Weight column", cols, index=min(2, len(cols) - 1))
 
             if st.button("Load CSV into holdings"):
                 mapped = pd.DataFrame(
@@ -422,7 +448,7 @@ with tab3:
         st.session_state["priced_df"] = build_prices(edited, usd_cad)
 
     if st.session_state["priced_df"] is not None:
-        st.caption("Rows with Price = 0 usually mean the ticker was not found.")
+        st.caption("Rows with Price = 0 usually mean the remote source did not match that ticker. You can still override those rows manually.")
 
         priced = st.data_editor(
             st.session_state["priced_df"],
