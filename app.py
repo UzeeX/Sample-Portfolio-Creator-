@@ -21,47 +21,6 @@ st.set_page_config(page_title="Portfolio Image/CSV to Sample Import CSV", layout
 
 DEFAULT_TOTAL_CAD = 1_000_000.0
 
-DEFAULT_PORTFOLIO = [
-    ("CAD", "Encaisse", 1.0),
-    ("CCL.B", "CCL Industrie", 1.5),
-    ("TECK.B", "Teck ressources", 1.5),
-    ("META", "Meta Platform", 1.5),
-    ("ETN", "Eaton Corporation", 1.5),
-    ("WSP", "WSP Global", 1.5),
-    ("NTR", "Nutrien", 1.5),
-    ("AVGO", "Broadcom Inc", 1.5),
-    ("ATRL", "Groupe Atkinsrealis", 1.5),
-    ("MCD", "Mcdonalds", 2.0),
-    ("MRU", "Metro Inc", 2.0),
-    ("JPM", "JP Morgan Chase", 2.0),
-    ("NA", "Banque National du Canada", 2.0),
-    ("NKE", "Nike Inc", 2.0),
-    ("T", "Telus Corp", 2.0),
-    ("UNH", "United Health Group", 2.0),
-    ("MA", "Mastercard", 2.0),
-    ("BCE", "BCE INC", 2.0),
-    ("ARX", "ARC Ressources", 2.0),
-    ("WCN", "Waste Connections Inc", 2.0),
-    ("TFII", "TFI International Inc", 2.0),
-    ("GSK", "GlaxoSmithKline", 2.0),
-    ("CVE", "Cenovus Energy", 2.5),
-    ("AAPL", "Apple Inc", 3.0),
-    ("ENB", "Enbridge", 3.0),
-    ("MSFT", "Microsoft", 3.0),
-    ("RY", "Banque Royale du Canada", 3.0),
-    ("TD", "Banque Toronto Dominion", 3.0),
-    ("WMT", "Walmart", 3.0),
-    ("FLEM", "Franklin Emerging Market ETF", 3.0),
-    ("ATD", "Alimentation Couche-Tard", 3.0),
-    ("FGDL", "Franklin Gold ETF", 3.0),
-    ("AMZN", "Amazon", 3.5),
-    ("TSM", "Taiwan Semiconductor", 4.0),
-    ("GOOGL", "Alphabet Inc", 4.0),
-    ("BRK.B", "Berkshire Hathaway", 5.0),
-    ("FHIS", "Franklin CND ultra short bond ETF", 7.5),
-    ("EQY", "Franklin All Equity ETF", 7.5),
-]
-
 SAMPLE_COLUMNS = [
     "Date",
     "Type",
@@ -75,8 +34,6 @@ SAMPLE_COLUMNS = [
     "Affect Cash",
 ]
 
-# Stooq suffix assumptions for last-price fetch
-# US -> .us, Canada -> .ca
 TICKER_MAP = {
     "CCL.B": {"stooq": "ccl-b.ca", "mic": "XTSE", "country": "CA", "currency": "CAD"},
     "TECK.B": {"stooq": "teck-b.ca", "mic": "XTSE", "country": "CA", "currency": "CAD"},
@@ -118,20 +75,19 @@ TICKER_MAP = {
     "CAD": {"stooq": None, "mic": "XOTC", "country": "CA", "currency": "CAD"},
 }
 
-# Fallback manual price hints for common names if remote fetch misses.
 PRICE_FALLBACKS = {
     "CAD": 1.0,
 }
 
+
 def init_state():
     if "holdings_df" not in st.session_state:
-        st.session_state["holdings_df"] = pd.DataFrame(
-            DEFAULT_PORTFOLIO, columns=["Ticker", "Name", "Weight %"]
-        )
+        st.session_state["holdings_df"] = pd.DataFrame(columns=["Ticker", "Name", "Weight %"])
     if "usd_cad" not in st.session_state:
         st.session_state["usd_cad"] = 1.37
     if "priced_df" not in st.session_state:
         st.session_state["priced_df"] = None
+
 
 def clean_weight(value) -> Optional[float]:
     if value is None:
@@ -145,11 +101,13 @@ def clean_weight(value) -> Optional[float]:
     except Exception:
         return None
 
+
 def normalize_ticker(ticker: str) -> str:
     t = (ticker or "").upper().strip().replace(" ", "")
     t = t.replace("BRK/B", "BRK.B").replace("BRK-B", "BRK.B")
     t = t.replace("TECK-B", "TECK.B").replace("CCL-B", "CCL.B")
     return t
+
 
 def parse_text_portfolio(raw_text: str) -> pd.DataFrame:
     rows: List[Tuple[str, str, float]] = []
@@ -184,6 +142,7 @@ def parse_text_portfolio(raw_text: str) -> pd.DataFrame:
 
     return pd.DataFrame(rows, columns=["Ticker", "Name", "Weight %"])
 
+
 def image_to_text(image: Image.Image) -> str:
     if not OCR_AVAILABLE:
         return ""
@@ -193,11 +152,10 @@ def image_to_text(image: Image.Image) -> str:
         result, _ = engine(gray)
         if not result:
             return ""
-        return "\n".join(
-            [item[1] for item in result if item and len(item) > 1 and item[1]]
-        )
+        return "\n".join([item[1] for item in result if item and len(item) > 1 and item[1]])
     except Exception:
         return ""
+
 
 @st.cache_data(show_spinner=False)
 def fetch_text(url: str, timeout: int = 15) -> str:
@@ -211,9 +169,9 @@ def fetch_text(url: str, timeout: int = 15) -> str:
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8", errors="ignore")
 
+
 @st.cache_data(show_spinner=False)
 def get_fx_usd_cad() -> float:
-    # exchangerate.host simple endpoint, no Python package needed
     try:
         url = "https://api.exchangerate.host/convert?from=USD&to=CAD&amount=1"
         text = fetch_text(url)
@@ -225,6 +183,7 @@ def get_fx_usd_cad() -> float:
     except Exception:
         pass
     return 1.37
+
 
 @st.cache_data(show_spinner=False)
 def fetch_last_price_stooq(symbol: Optional[str]) -> Optional[float]:
@@ -246,6 +205,7 @@ def fetch_last_price_stooq(symbol: Optional[str]) -> Optional[float]:
     except Exception:
         return None
     return None
+
 
 def build_prices(df: pd.DataFrame, usd_cad: float) -> pd.DataFrame:
     out = df.copy()
@@ -274,6 +234,7 @@ def build_prices(df: pd.DataFrame, usd_cad: float) -> pd.DataFrame:
         )
 
     return pd.concat([out.reset_index(drop=True), pd.DataFrame(meta_rows)], axis=1)
+
 
 def allocate_portfolio(df: pd.DataFrame, total_cad: float):
     out = df.copy()
@@ -307,11 +268,31 @@ def allocate_portfolio(df: pd.DataFrame, total_cad: float):
     invested = float(out.loc[out["Ticker"] != "CAD", "Allocated CAD"].sum())
     residual_cash = round(total_cad - invested, 2)
 
-    out.loc[out["Ticker"] == "CAD", "Shares"] = 0
-    out.loc[out["Ticker"] == "CAD", "Cost Basis"] = residual_cash
-    out.loc[out["Ticker"] == "CAD", "Allocated CAD"] = residual_cash
+    cash_mask = out["Ticker"] == "CAD"
+    if cash_mask.any():
+        out.loc[cash_mask, "Shares"] = 0
+        out.loc[cash_mask, "Cost Basis"] = residual_cash
+        out.loc[cash_mask, "Allocated CAD"] = residual_cash
+    else:
+        cash_row = pd.DataFrame([{
+            "Ticker": "CAD",
+            "Name": "Cash",
+            "Weight %": 0.0,
+            "Target CAD": 0.0,
+            "Remote Symbol": None,
+            "Currency": "CAD",
+            "Price": 1.0,
+            "MIC": "XOTC",
+            "Listing Country": "CA",
+            "Exchange Rate": 1.0,
+            "Shares": 0,
+            "Cost Basis": residual_cash,
+            "Allocated CAD": residual_cash,
+        }])
+        out = pd.concat([out, cash_row], ignore_index=True)
 
     return out, residual_cash
+
 
 def to_sample_csv(df: pd.DataFrame, as_of_date: str) -> pd.DataFrame:
     rows = []
@@ -332,13 +313,15 @@ def to_sample_csv(df: pd.DataFrame, as_of_date: str) -> pd.DataFrame:
         )
     return pd.DataFrame(rows, columns=SAMPLE_COLUMNS)
 
+
 def csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8-sig")
+
 
 init_state()
 
 st.title("Portfolio Image/CSV to Sample Import CSV")
-st.caption("Reads from image, pasted text, or CSV. Default base is C$1,000,000.")
+st.caption("Starts empty. Upload an image, paste text, or upload CSV. Base portfolio defaults to C$1,000,000.")
 
 if not OCR_AVAILABLE:
     st.info("OCR package is not installed. Image upload still works, but text extraction from images is disabled.")
@@ -374,36 +357,26 @@ with tab1:
     )
     pasted_text = st.text_area("Or paste text directly", height=220)
 
-    col_a, col_b = st.columns(2)
+    if st.button("Parse image / text"):
+        parsed_df = pd.DataFrame(columns=["Ticker", "Name", "Weight %"])
+        ocr_text = ""
 
-    with col_a:
-        if st.button("Use default sample portfolio"):
-            st.session_state["holdings_df"] = pd.DataFrame(
-                DEFAULT_PORTFOLIO, columns=["Ticker", "Name", "Weight %"]
-            )
-            st.success("Loaded default portfolio.")
+        if uploaded_image is not None:
+            image = Image.open(uploaded_image)
+            st.image(image, caption="Uploaded image", use_container_width=True)
+            ocr_text = image_to_text(image)
+            if ocr_text:
+                st.text_area("OCR text", value=ocr_text, height=220)
 
-    with col_b:
-        if st.button("Parse image / text"):
-            parsed_df = pd.DataFrame(columns=["Ticker", "Name", "Weight %"])
-            ocr_text = ""
+        source_text = pasted_text.strip() if pasted_text.strip() else ocr_text
+        if source_text:
+            parsed_df = parse_text_portfolio(source_text)
 
-            if uploaded_image is not None:
-                image = Image.open(uploaded_image)
-                st.image(image, caption="Uploaded image", use_container_width=True)
-                ocr_text = image_to_text(image)
-                if ocr_text:
-                    st.text_area("OCR text", value=ocr_text, height=220)
-
-            source_text = pasted_text.strip() if pasted_text.strip() else ocr_text
-            if source_text:
-                parsed_df = parse_text_portfolio(source_text)
-
-            if parsed_df.empty:
-                st.warning("Nothing reliable was parsed. You can still edit the table manually in the Review tab.")
-            else:
-                st.session_state["holdings_df"] = parsed_df
-                st.success(f"Parsed {len(parsed_df)} rows.")
+        if parsed_df.empty:
+            st.warning("Nothing reliable was parsed. You can still edit the table manually in the Review tab.")
+        else:
+            st.session_state["holdings_df"] = parsed_df
+            st.success(f"Parsed {len(parsed_df)} rows.")
 
 with tab2:
     uploaded_csv = st.file_uploader("Upload CSV", type=["csv"], key="csv_upl")
@@ -438,17 +411,21 @@ with tab3:
         key="holdings_editor",
     )
 
-    edited["Ticker"] = edited["Ticker"].astype(str).map(normalize_ticker)
-    edited["Weight %"] = pd.to_numeric(edited["Weight %"], errors="coerce")
-    edited = edited.dropna(subset=["Ticker", "Weight %"]).reset_index(drop=True)
+    if not edited.empty:
+        edited["Ticker"] = edited["Ticker"].astype(str).map(normalize_ticker)
+        edited["Weight %"] = pd.to_numeric(edited["Weight %"], errors="coerce")
+        edited = edited.dropna(subset=["Ticker", "Weight %"]).reset_index(drop=True)
 
-    st.metric("Weight total", f"{edited['Weight %'].sum():.2f}%")
+    st.metric("Weight total", f"{edited['Weight %'].sum() if not edited.empty else 0:.2f}%")
 
     if st.button("Build pricing table"):
-        st.session_state["priced_df"] = build_prices(edited, usd_cad)
+        if edited.empty:
+            st.warning("Please upload or enter holdings first.")
+        else:
+            st.session_state["priced_df"] = build_prices(edited, usd_cad)
 
     if st.session_state["priced_df"] is not None:
-        st.caption("Rows with Price = 0 usually mean the remote source did not match that ticker. You can still override those rows manually.")
+        st.caption("Rows with Price = 0 usually mean the remote source did not match that ticker.")
 
         priced = st.data_editor(
             st.session_state["priced_df"],
